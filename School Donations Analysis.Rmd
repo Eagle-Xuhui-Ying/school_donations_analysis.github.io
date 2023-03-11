@@ -1,0 +1,943 @@
+---
+title: "Final Project Donors Choose"
+author: "Eagle Xuhui Ying"
+date: "12/08/2022"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    toc: yes
+    toc_depth: 3
+    theme: paper
+    highlight: tango
+    df_print: paged
+---
+
+# Load Libraries 
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+options(warn = -1)
+options(scipen = 999) # turns off scientific notation
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(janitor)
+library(skimr)
+library(modelr)
+library(GGally)
+library(kableExtra) # make nice looking results when we knit
+library(fastshap)   # shapley values for variable importance 
+library(MASS)
+library(tree)
+library(ggplot2)
+library(corrplot)
+library(factoextra)
+library(rpart.plot) # plotting decision trees
+library(lubridate)
+library(vip)
+library(NeuralNetTools) # visualization of neural networks 
+library(reshape2)
+library(PerformanceAnalytics)
+```
+
+# Load Data
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+donormerge <- read_csv("DonorMerge_Final.csv") %>% clean_names() %>% mutate(days_from_now = as.numeric(Sys.Date() - mdy(date_posted))) %>% dplyr::select(-date_posted)
+
+head(donormerge)
+skim(donormerge)
+
+# drop columns: drop secondary_focus_subject, secondary_focus_area (>20% missing values)
+
+donations <- read_csv("Donations.csv") %>% clean_names()
+head(donations)
+skim(donations)
+
+```
+
+# Explantory Data Analysis (EDA)
+
+## Explore Target (donormerge)
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+donormerge_summary <- donormerge %>%
+  count(is_exciting) %>%
+  mutate(pct = n/sum(n))
+
+donormerge_summary
+
+donormerge_summary %>%
+  ggplot(aes(x=factor(is_exciting),y=pct)) +
+  geom_col()  + 
+  geom_text(aes(x=factor(is_exciting), y=pct+0.034, label=round(pct,2)), vjust=2.5, colour="white") +
+  labs(title="Exciting or Not", x="Exciting or Not", y="PCT")
+
+```
+
+## Explore Numerics (donormerge)
+
+numeric variables: school_latitude, school_longitude, great_messages_proportion, total_price_excluding_optional_s, total_price_including_optional_s, students_reached, days_from_now
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+# -- comparative boxplots
+
+boxplot <- function(m){
+    donormerge %>%
+    na.omit() %>%
+    filter(total_price_excluding_optional_s < 5000 & students_reached < 1000) %>% 
+    ggplot(aes(x=!!as.name(m), y=as.factor(is_exciting), fill=as.factor(is_exciting))) + 
+    geom_boxplot() +
+    labs(title = as.character(m), y = 'exciting or not') +
+    theme(legend.title = element_blank()) 
+}
+
+numerics <- c('school_latitude', 'school_longitude', 'great_messages_proportion', 'total_price_excluding_optional_s', 'total_price_including_optional_s', 'students_reached', 'days_from_now')
+
+for (c in numerics){
+    print(boxplot(c))
+}
+
+```
+
+## Explore Character Variables (donormerge)
+
+categorical variables: school_state, school_metro, one_non_teacher_referred_donor_g, teacher_referred_count, non_teacher_referred_count, school_charter, school_magnet, school_year_round, school_nlns, school_kipp, school_charter_ready_promise, teacher_prefix, teacher_teach_for_america, teacher_ny_teaching_fellow, primary_focus_subject, primary_focus_area, secondary_focus_subject, secondary_focus_area, resource_type, poverty_level, grade_level, fulfillment_labor_materials, eligible_double_your_impact_matc, eligible_almost_home_match
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+char_fill <- function(col){
+    donormerge %>%
+    na.omit() %>%
+    ggplot(aes(!!as.name(col), fill = as.factor(is_exciting))) + 
+    geom_bar(position = 'fill') +
+    coord_flip() +
+    labs(y = 'proportion') +
+    theme(legend.title = element_blank())
+}
+
+dummy <- c('school_state', 'school_metro', 'one_non_teacher_referred_donor_g', 'teacher_referred_count', 'non_teacher_referred_count', 'school_charter', 'school_magnet', 'school_year_round', 'school_nlns', 'school_kipp', 'school_charter_ready_promise', 'teacher_prefix', 'teacher_teach_for_america', 'teacher_ny_teaching_fellow', 'primary_focus_subject', 'primary_focus_area', 'secondary_focus_subject', 'secondary_focus_area', 'resource_type', 'poverty_level', 'grade_level', 'fulfillment_labor_materials', 'eligible_double_your_impact_matc', 'eligible_almost_home_match')
+
+# -- for each character column, create a chart
+for (column in dummy){
+    print(char_fill(column))
+}
+
+```
+
+## Correlations (donormerge)
+ 
+create a correlation matrix of key numeric varaibles: school_latitude, school_longitude, great_messages_proportion, total_price_excluding_optional_s, students_reached, days_from_now
+
+hint: you need to deal with  missing values 
+
+```{r, eval=TRUE, message=FALSE, warning=FALSE}
+cor_analysis <- donormerge %>%
+  filter(total_price_excluding_optional_s < 5000 & students_reached < 1000) %>%
+  na.omit() %>%
+  dplyr::select(school_latitude, school_longitude, great_messages_proportion, total_price_excluding_optional_s, students_reached, days_from_now) %>%
+  cor() %>%
+  melt() %>%
+  arrange(desc(value)) 
+ 
+cor_analysis_1 <- donormerge %>%
+  na.omit() %>%
+  dplyr::select(school_latitude, school_longitude, great_messages_proportion, total_price_excluding_optional_s, students_reached, days_from_now)
+
+cormat <- cor(cor_analysis_1)
+round(cormat, 2) 
+corrplot(cormat)
+
+pairs(cor_analysis_1)
+
+chart.Correlation(cor_analysis_1, histogram=TRUE, pch=4)
+
+cor_analysis %>%
+  ggplot(aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "black")+ geom_text(aes(label = round(value,2)), color = "white", size = 3) +
+  coord_fixed() +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+```
+
+## Explore Numerics (donations)
+
+numeric variables: donation_to_project, donation_optional_support, donation_total
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+donations %>% filter(donation_to_project<500) %>% ggplot(aes(x=donation_to_project)) + geom_histogram(binwidth=10) + theme(axis.text.x=element_text(angle=45, hjust=1))
+
+donations %>% filter(donation_optional_support<100) %>% ggplot(aes(x=donation_optional_support)) + geom_histogram(binwidth=2) + theme(axis.text.x=element_text(angle=45, hjust=1))
+
+donations %>% filter(donation_total<300) %>% ggplot(aes(x=donation_total)) + geom_histogram(binwidth=5) + theme(axis.text.x=element_text(angle=45, hjust=1))
+
+```
+
+## Explore Character Variables (donations)
+
+categorical variables: is_teacher_acct, dollar_amount, donation_included_optional_support, payment_method, payment_included_acct_credit, payment_included_campaign_gift_card, payment_included_web_purchased_gift_card, payment_was_promo_matched, via_giving_page, for_honoree
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+bar <- function(col){
+    donations %>%
+    na.omit() %>%
+    ggplot(aes(!!as.name(col))) +
+    geom_bar() +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+}
+
+dummy <- c('is_teacher_acct', 'dollar_amount', 'donation_included_optional_support', 'payment_method', 'payment_included_acct_credit', 'payment_included_campaign_gift_card', 'payment_included_web_purchased_gift_card', 'payment_was_promo_matched', 'via_giving_page', 'for_honoree')
+
+for (column in dummy){
+    print(bar(column))
+}
+
+```
+
+## Correlations (donations)
+ 
+create a correlation matrix of key numeric varaibles: donation_to_project, donation_optional_support, donation_total
+
+hint: you need to deal with  missing values 
+
+```{r, eval=TRUE, message=FALSE, warning=FALSE}
+
+cor_analysis <- donations %>% 
+  filter(donation_to_project<500 & donation_optional_support<100 & donation_total<300) %>%
+  na.omit() %>%
+  dplyr::select(donation_to_project, donation_optional_support, donation_total) %>%
+  cor() %>%
+  melt() %>%
+  arrange(desc(value)) 
+ 
+cor_analysis_1 <- donations %>% filter(donation_to_project<500 & donation_optional_support<100 & donation_total<300) %>%
+  na.omit() %>%
+  dplyr::select(donation_to_project, donation_optional_support, donation_total)
+
+cormat <- cor(cor_analysis_1)
+round(cormat, 2) 
+corrplot(cormat)
+
+pairs(cor_analysis_1)
+
+chart.Correlation(cor_analysis_1, histogram=TRUE, pch=4)
+
+cor_analysis %>%
+  ggplot(aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "black")+ geom_text(aes(label = round(value,2)), color = "white", size = 3) +
+  coord_fixed()
+
+```
+
+# K-Means Clustering
+
+## Create Clusters
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+donations$donation_to_project[is.na(donations$donation_to_project)]<-median(donations$donation_to_project,na.rm=TRUE)
+donations$donation_optional_support[is.na(donations$donation_optional_support)]<-median(donations$donation_optional_support,na.rm=TRUE)
+donations$donation_total[is.na(donations$donation_total)]<-median(donations$donation_total,na.rm=TRUE)
+
+clusters_prep <- donations %>% dplyr::select(-donationid, -projectid, -donor_acctid, -donor_city, -donor_state, -donor_zip, -donation_timestamp, -donation_message) %>% na.omit() %>% filter(donation_to_project<500) %>% filter(donation_optional_support<100) %>% filter(donation_total<300)
+# na.omit(): drop 12 rows of missing values
+
+clusters <- clusters_prep
+
+# create dummy variables for gender and promotional class
+
+clusters$is_under_10 <- ifelse(clusters$dollar_amount == 'under_10', 1, 0)
+clusters$is_10_to_100 <- ifelse(clusters$dollar_amount == '10_to_100', 1, 0)
+clusters$is_100_and_up <- ifelse(clusters$dollar_amount == '100_and_up', 1, 0)
+
+clusters$almost_home_match <- ifelse(clusters$payment_method == 'almost_home_match', 1, 0)
+clusters$amazon <- ifelse(clusters$payment_method == 'amazon', 1, 0)
+clusters$check <- ifelse(clusters$payment_method == 'check', 1, 0)
+clusters$creditcard <- ifelse(clusters$payment_method == 'creditcard', 1, 0)
+clusters$double_your_impact_match <- ifelse(clusters$payment_method == 'double_your_impact_match', 1, 0)
+clusters$no_cash_received <- ifelse(clusters$payment_method == 'no_cash_received', 1, 0)
+clusters$paypal <- ifelse(clusters$payment_method == 'paypal', 1, 0)
+clusters$promo_code_match <- ifelse(clusters$payment_method == 'promo_code_match', 1, 0)
+
+clusters$is_is_teacher_acct <- ifelse(clusters$is_teacher_acct == 'TRUE', 1, 0)
+
+clusters$is_donation_included_optional_support <- ifelse(clusters$donation_included_optional_support == 'TRUE', 1, 0)
+
+clusters$is_payment_included_acct_credit <- ifelse(clusters$payment_included_acct_credit == 'TRUE', 1, 0)
+
+clusters$is_payment_included_campaign_gift_card <- ifelse(clusters$payment_included_campaign_gift_card == 'TRUE', 1, 0)
+
+clusters$is_payment_included_web_purchased_gift_card <- ifelse(clusters$payment_included_web_purchased_gift_card == 'TRUE', 1, 0)
+
+clusters$is_payment_was_promo_matched <- ifelse(clusters$payment_was_promo_matched == 'TRUE', 1, 0)
+
+clusters$is_via_giving_page <- ifelse(clusters$via_giving_page == 'TRUE', 1, 0)
+
+clusters$is_for_honoree <- ifelse(clusters$for_honoree == 'TRUE', 1, 0)
+
+# standardize numeric variables
+
+clusters$donation_to_project <- scale(clusters$donation_to_project)
+clusters$donation_optional_support <- scale(clusters$donation_optional_support)
+clusters$donation_total <- scale(clusters$donation_total)
+
+clusters %>% skim()
+
+# remove redundant and rejected variables
+donor_clusters = subset(clusters, select= -c(is_teacher_acct, dollar_amount, donation_included_optional_support, payment_method, payment_included_acct_credit, payment_included_campaign_gift_card, payment_included_web_purchased_gift_card, payment_was_promo_matched, via_giving_page, for_honoree))
+                                    
+head(donor_clusters)
+
+skim(donor_clusters)
+
+clusters_sample <- donor_clusters %>% sample_n(5000)
+
+```
+
+## Visually Choose Number of Clusters (Elbow Plot)
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+# how many clusters
+
+fviz_nbclust(clusters_sample, kmeans, method="wss")
+```
+
+## Build Clusters
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+set.seed(1234)
+
+clusters5 <- kmeans(donor_clusters, 5, iter.max = 200, nstart = 5)
+print(clusters5)
+
+# visualize clusters
+
+fviz_cluster(clusters5,donor_clusters,ellipse.type="norm",geom="point")
+
+```
+
+## Explore Clusters
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+cluster <- as.factor(clusters5$cluster)
+
+clusters5
+
+#determine which variables are driving the cluster creation
+
+tree.clusters=tree(cluster~.,donor_clusters)
+
+summary(tree.clusters)
+plot(tree.clusters)
+text(tree.clusters,pretty=0)
+tree.clusters
+
+# Show Proportion of Each Cluster
+
+clusters_prep$cluster <- clusters5$cluster
+
+```
+
+## Profile Clusters
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+clusters_prep %>%
+  group_by(clusters_prep$cluster) %>%
+  summarize(n=n(),
+            pct = n/nrow(clusters_prep),
+            mean_donation_to_project = mean(donation_to_project),
+            mean_donation_optional_support = mean(donation_optional_support),
+            mean_donation_total = mean(donation_total)
+            )
+
+ggplot(clusters_prep,aes(cluster))+geom_bar()
+
+ggplot(clusters_prep,aes(x=donation_to_project))+geom_histogram(binwidth=10)+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(x=donation_to_project))+geom_histogram(binwidth=10)+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(x=donation_optional_support))+geom_histogram(binwidth=2)+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(x=donation_optional_support))+geom_histogram(binwidth=2)+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(x=donation_total))+geom_histogram(binwidth=5)+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(x=donation_total))+geom_histogram(binwidth=5)+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(is_teacher_acct))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(is_teacher_acct))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(dollar_amount))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(dollar_amount))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(donation_included_optional_support))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(donation_included_optional_support))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(payment_method))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(payment_method))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(payment_included_acct_credit))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(payment_included_acct_credit))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(payment_included_campaign_gift_card))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(payment_included_campaign_gift_card))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(payment_included_web_purchased_gift_card))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(payment_included_web_purchased_gift_card))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(payment_was_promo_matched))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(payment_was_promo_matched))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(via_giving_page))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(via_giving_page))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+ggplot(clusters_prep,aes(for_honoree))+geom_bar()+theme(axis.text.x=element_text(angle=45, hjust=1))
+ggplot(clusters_prep,aes(for_honoree))+geom_bar()+facet_wrap(~clusters5$cluster)+theme(axis.text.x=element_text(angle=45, hjust=1))
+
+```
+
+# Data Transformation
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+data <- donormerge %>% dplyr::select(-projectid, -teacher_acctid, -schoolid, -school_ncesid, -school_city, -school_state, -school_zip, -school_county, -school_metro, -school_district, -secondary_focus_subject, -primary_focus_subject, -secondary_focus_area) %>% mutate_if(is.character, factor) %>% mutate(is_exciting = as.factor(is_exciting))
+
+data$one_non_teacher_referred_donor_g <- as.factor(data$one_non_teacher_referred_donor_g)
+data$school_charter <- as.factor(data$school_charter)
+data$school_magnet <- as.factor(data$school_magnet)
+data$school_year_round <- as.factor(data$school_year_round)
+data$school_nlns <- as.factor(data$school_nlns)
+data$school_kipp <- as.factor(data$school_kipp)
+data$school_charter_ready_promise <- as.factor(data$school_charter_ready_promise)
+data$teacher_teach_for_america <- as.factor(data$teacher_teach_for_america)
+data$teacher_ny_teaching_fellow <- as.factor(data$teacher_ny_teaching_fellow)
+data$eligible_double_your_impact_matc <- as.factor(data$eligible_double_your_impact_matc)
+data$eligible_almost_home_match <- as.factor(data$eligible_almost_home_match)
+
+head(data)
+```
+
+# Partition Data into 70/30 Train/Test Split
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+set.seed(1234)
+
+# -- performs our train / test split 
+split <- initial_split(data, prop = 0.7)
+
+# -- extract the training data form our banana split 
+train <- training(split)
+# -- extract the test data 
+test <- testing(split)
+
+sprintf("Train PCT : %1.2f%%", nrow(train)/ nrow(data) * 100)
+sprintf("Test  PCT : %1.2f%%", nrow(test)/ nrow(data) * 100)
+```
+
+# Logistic Regression (Full Model)
+
+## Standard Logistic Model (Full Model)
+
+- make a recipe 
+- specify a formula 
+- normalize (center and scale) the numeric variables - required for lasso/ridge
+- dummy encode nominal predictors 
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+donor_recipe <- recipe(is_exciting ~ ., 
+                      data = train) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+logistic_spec <- logistic_reg() %>%
+  set_mode("classification") %>%
+  set_engine("glm")
+
+logistic_wf <- workflow() %>%
+  add_recipe(donor_recipe) %>%
+  add_model(logistic_spec) %>%
+  fit(train)
+
+logistic_wf %>%
+  pull_workflow_fit() %>%
+  tidy() %>%
+   mutate(across(is.numeric,round,3))
+
+predict(logistic_wf, train, type="prob") %>%
+  bind_cols(predict(logistic_wf, train, type="class")) %>%
+  bind_cols(train) -> logistic_train 
+
+predict(logistic_wf, test, type="prob") %>%
+  bind_cols(predict(logistic_wf, test, type="class")) %>%
+  bind_cols(test) -> logistic_test 
+
+logistic_train %>%
+  metrics(is_exciting, estimate = .pred_class, .pred_TRUE) %>%
+  mutate(part="training") %>%
+bind_rows(logistic_test %>%
+  metrics(is_exciting, estimate = .pred_class, .pred_TRUE) %>%
+  mutate(part="testing"))
+
+```
+
+## Logistic Model Evaluation (Full Model)
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+# -- deal w. the first event issue -- # 
+options(yardstick.event_first = FALSE)
+
+logistic_wf %>%
+  pull_workflow_fit() %>%
+  vip()
+
+logistic_train %>% mutate(model = "train") %>%
+  bind_rows(logistic_test %>% mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(is_exciting, .pred_TRUE) %>%
+  autoplot()
+
+logistic_train %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >=0.5,TRUE,FALSE))) %>%
+   conf_mat(is_exciting, estimate = predict_class) %>%
+   autoplot(type = "heatmap") +
+   labs(title="confusion matrix threshold >= 0.5")
+
+logistic_train_mutate <- logistic_train %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >=0.5,TRUE,FALSE)))
+
+logistic_test %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >=0.5,TRUE,FALSE))) %>%
+   conf_mat(is_exciting, estimate = predict_class) %>%
+   autoplot(type = "heatmap") +
+   labs(title="confusion matrix threshold >= 0.5")
+
+logistic_test_mutate <- logistic_test %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >=0.5,TRUE,FALSE)))
+
+logistic_train %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    bind_rows(logistic_train_mutate %>% yardstick::precision(is_exciting, predict_class)) %>%
+    bind_rows(logistic_train_mutate %>% yardstick::recall(is_exciting, predict_class)) %>%
+    filter(.metric %in% c("accuracy", "roc_auc", "precision", "recall")) %>%
+    mutate(part="training") %>%
+bind_rows(logistic_test %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    bind_rows(logistic_test_mutate %>% yardstick::precision(is_exciting, predict_class)) %>%
+    bind_rows(logistic_test_mutate %>% yardstick::recall(is_exciting, predict_class)) %>%
+    filter(.metric %in% c("accuracy", "roc_auc", "precision", "recall")) %>%
+    mutate(part="testing"))
+
+```
+
+# Lasso
+
+## Lasso L1 Regularization 
+
+Here we use the hyper parameters
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+lasso_spec <- logistic_reg(penalty = 0.01, mixture = 1) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+lasso_wf <- workflow() %>%
+  add_recipe(donor_recipe) %>%
+  add_model(lasso_spec) %>%
+  fit(train)
+
+lasso_wf %>%
+ pull_workflow_fit() %>%
+  tidy() %>%
+  filter(estimate != 0)
+
+predict(lasso_wf, train, type="prob") %>%
+  bind_cols(predict(lasso_wf, train, type="class")) %>%
+  bind_cols(train) -> lasso_train 
+
+predict(lasso_wf, test, type="prob") %>%
+  bind_cols(predict(lasso_wf, test, type="class")) %>%
+  bind_cols(test) -> lasso_test 
+
+lasso_train %>%
+  metrics(is_exciting, estimate = .pred_class, .pred_TRUE) %>%
+  mutate(part="training") %>%
+bind_rows(lasso_test %>%
+  metrics(is_exciting, estimate = .pred_class, .pred_TRUE) %>%
+  mutate(part="testing"))
+
+```
+
+## Lasso Evaluation
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+# -- deal w. the first event issue -- # 
+options(yardstick.event_first = FALSE)
+
+lasso_wf %>%
+  pull_workflow_fit() %>%
+  vip()
+
+lasso_train %>% mutate(model = "train") %>%
+  bind_rows(lasso_test %>% mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(is_exciting, .pred_TRUE) %>%
+  autoplot()
+
+lasso_train %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >=0.5,TRUE,FALSE))) %>%
+   conf_mat(is_exciting, estimate = predict_class) %>%
+   autoplot(type = "heatmap") +
+   labs(title="confusion matrix threshold >= 0.5")
+
+lasso_train_mutate <- lasso_train %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >=0.5,TRUE,FALSE)))
+
+lasso_test %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >=0.5,TRUE,FALSE))) %>%
+   conf_mat(is_exciting, estimate = predict_class) %>%
+   autoplot(type = "heatmap") +
+   labs(title="confusion matrix threshold >= 0.5")
+
+lasso_test_mutate <- lasso_test %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >=0.5,TRUE,FALSE)))
+
+lasso_train %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    bind_rows(lasso_train_mutate %>% yardstick::precision(is_exciting, predict_class)) %>%
+    bind_rows(lasso_train_mutate %>% yardstick::recall(is_exciting, predict_class)) %>%
+    filter(.metric %in% c("accuracy", "roc_auc", "precision", "recall")) %>%
+    mutate(part="training") %>%
+bind_rows(lasso_test %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    bind_rows(lasso_test_mutate %>% yardstick::precision(is_exciting, predict_class)) %>%
+    bind_rows(lasso_test_mutate %>% yardstick::recall(is_exciting, predict_class)) %>%
+    filter(.metric %in% c("accuracy", "roc_auc", "precision", "recall")) %>%
+    mutate(part="testing"))
+
+```
+
+# Define Recipe & Bake
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+recipe <- recipe(is_exciting ~ great_messages_proportion + teacher_referred_count + non_teacher_referred_count + fulfillment_labor_materials + days_from_now + one_non_teacher_referred_donor_g + teacher_teach_for_america, data=train) %>%
+    step_impute_median(all_numeric_predictors()) %>%
+    step_unknown(all_nominal_predictors()) %>%
+    step_scale(all_numeric_predictors()) %>%
+    step_novel(all_nominal_predictors()) %>% # new factor levels 
+    step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+    step_nzv(all_predictors()) %>%
+    prep()
+
+recipe
+
+bake(recipe %>% prep(), train, composition = "tibble") %>% head()
+
+bake_train <- bake(recipe, new_data = train)
+bake_test  <- bake(recipe, new_data = test)
+
+```
+
+# Neural Network
+
+## Define Neural Network Model
+
+```{r}
+
+# K-fold cross validation
+kfold_splits <- vfold_cv(train, v=5)
+
+nn_model <- mlp(hidden_units = tune(),
+                 penalty=tune(),
+  epochs = tune(),
+  ) %>%
+  set_engine("nnet") %>%
+  set_mode("classification") 
+
+nn_wflow <-workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(nn_model) 
+
+nn_search_res <- nn_wflow %>% 
+  tune_bayes(
+    resamples = kfold_splits,
+    # Generate five at semi-random to start
+    initial = 5,
+    iter = 50, 
+    # How to measure performance?
+    metrics = metric_set(yardstick::accuracy, yardstick::roc_auc),
+    control = control_bayes(no_improve = 5, verbose = TRUE)
+  )
+
+```
+
+## NNET Tuning 
+Evaluate our tuning efforts 
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+# Experiments 
+nn_search_res %>%
+  collect_metrics()  
+
+nn_search_res %>%
+  select_best("accuracy")
+
+tune_graph <- function(parm){
+# Graph of learning rate 
+nn_search_res %>%
+  collect_metrics() %>%
+  ggplot(aes(!!as.name(parm), mean, color = .metric)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err
+  ),
+  alpha = 0.5
+  ) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  scale_x_log10() +
+  theme(legend.position = "none")
+}
+
+tune_graph("hidden_units")
+tune_graph("penalty")
+tune_graph("epochs")
+
+```
+
+## Neural Network Final Fit
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+best_auc <- nn_search_res %>%
+  select_best("accuracy")
+
+best_auc
+
+nn_wflow <- finalize_workflow(
+  nn_wflow, best_auc
+) %>% 
+  fit(train)
+```
+
+## Score Neural Network Model
+
+```{r}
+bind_cols(
+  predict(nn_wflow, train, type="prob"), 
+  predict(nn_wflow, train, type="class"),
+  train) %>% 
+  mutate(part = "train") -> scored_nn_train
+
+bind_cols(
+  predict(nn_wflow,test, type="prob"), 
+  predict(nn_wflow,test, type="class"),
+  test) %>% 
+  mutate(part = "test") -> scored_nn_test
+```
+
+## Evaluate Neural Network Model
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+options(yardstick.event_first = FALSE)
+
+# Variable Importance
+nn_wflow %>%
+  extract_fit_parsnip() %>%
+  vi()
+nn_wflow %>%
+  extract_fit_parsnip() %>%
+  vip()
+
+# Metrics: Train and Test 
+scored_nn_train %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    mutate(part="training") %>%
+    bind_rows(scored_nn_test %>% 
+                 metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+                 mutate(part="testing") ) %>%
+    filter(.metric %in% c('accuracy','roc_auc')) %>%
+    pivot_wider(names_from = .metric, values_from=.estimate)
+
+# ROC Charts 
+scored_nn_train %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_nn_test %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(is_exciting, .pred_TRUE) %>%
+  autoplot()
+
+scored_nn_train %>%
+  conf_mat(is_exciting, .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_nn_test %>%
+  conf_mat(is_exciting, .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+
+scored_train_mutate <- scored_nn_train %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >= 0.5,TRUE,FALSE)))
+
+scored_test_mutate <- scored_nn_test %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >= 0.5,TRUE,FALSE)))
+
+scored_nn_train%>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    bind_rows(scored_train_mutate %>% yardstick::precision(is_exciting, predict_class)) %>%
+    bind_rows(scored_train_mutate %>% yardstick::recall(is_exciting, predict_class)) %>%
+    filter(.metric %in% c("accuracy", "roc_auc", "precision", "recall")) %>%
+    mutate(part="training") %>%
+bind_rows(scored_nn_test %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    bind_rows(scored_test_mutate %>% yardstick::precision(is_exciting, predict_class)) %>%
+    bind_rows(scored_test_mutate %>% yardstick::recall(is_exciting, predict_class)) %>%
+    filter(.metric %in% c("accuracy", "roc_auc", "precision", "recall")) %>%
+    mutate(part="testing"))
+
+```
+
+## Visualize Neural Networks
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+mod <- nn_wflow$fit$fit$fit
+plotnet(mod) 
+
+```
+
+# Random Forest
+
+## Define Random Forest Model
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+
+kfold_splits <- vfold_cv(train, v=5)
+
+rf_model <- rand_forest(trees=tune()) %>%
+  set_engine("ranger", num.threads = 5, max.depth = 10, importance="permutation") %>%
+  set_mode("classification")
+
+```
+
+## Random Forest Workflow 
+
+```{r}
+
+rf_wflow <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+rf_search_res <- rf_wflow %>% 
+  tune_bayes(
+    resamples = kfold_splits,
+    # Generate five at semi-random to start
+    initial = 5,
+    iter = 50, 
+    # How to measure performance?
+    metrics = metric_set(yardstick::accuracy, yardstick::roc_auc),
+    control = control_bayes(no_improve = 5, verbose = TRUE)
+  )
+
+```
+
+## Final Fit Random Forest
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+highest_rf_accuracy <- rf_search_res %>%
+  select_best("accuracy")
+
+highest_rf_accuracy
+
+rf_wflow <- finalize_workflow(
+  rf_wflow, highest_rf_accuracy
+) %>% 
+  fit(train)
+```
+
+## Score Random Forest Model
+
+```{r, eval=TRUE, warning=FALSE, message=FALSE}
+  # score training
+  predict(rf_wflow, train, type="prob") %>%
+    bind_cols(predict(rf_wflow, train, type="class")) %>%
+    bind_cols(., train) -> scored_train_rf
+
+  # score testing 
+  predict(rf_wflow, test, type="prob") %>%
+      bind_cols(predict(rf_wflow, test, type="class")) %>%
+      bind_cols(., test) -> scored_test_rf
+```
+
+## Random Forest Model Evaluation
+  
+```{r, eval=TRUE, warning=FALSE, message=FALSE} 
+
+options(yardstick.event_first = FALSE)
+
+# Variable Importance
+rf_wflow %>%
+  extract_fit_parsnip() %>%
+  vi()
+rf_wflow %>%
+  extract_fit_parsnip() %>%
+  vip()
+
+# Metrics: Train and Test 
+scored_train_rf %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    mutate(part="training") %>%
+    bind_rows(scored_test_rf %>% 
+                 metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+                 mutate(part="testing") ) %>%
+    filter(.metric %in% c('accuracy','roc_auc')) %>%
+    pivot_wider(names_from = .metric, values_from=.estimate)
+
+# ROC Charts 
+scored_train_rf %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_rf %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(is_exciting, .pred_TRUE) %>%
+  autoplot()
+
+scored_train_rf %>%
+  conf_mat(is_exciting, .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_rf %>%
+  conf_mat(is_exciting, .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+
+scored_train_mutate <- scored_train_rf %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >= 0.5,TRUE,FALSE)))
+
+scored_test_mutate <- scored_test_rf %>%
+   mutate(predict_class = as.factor(if_else(.pred_TRUE >= 0.5,TRUE,FALSE)))
+
+scored_train_rf %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    bind_rows(scored_train_mutate %>% yardstick::precision(is_exciting, predict_class)) %>%
+    bind_rows(scored_train_mutate %>% yardstick::recall(is_exciting, predict_class)) %>%
+    filter(.metric %in% c("accuracy", "roc_auc", "precision", "recall")) %>%
+    mutate(part="training") %>%
+bind_rows(scored_test_rf %>% 
+    metrics(is_exciting, .pred_TRUE, estimate = .pred_class) %>%
+    bind_rows(scored_test_mutate %>% yardstick::precision(is_exciting, predict_class)) %>%
+    bind_rows(scored_test_mutate %>% yardstick::recall(is_exciting, predict_class)) %>%
+    filter(.metric %in% c("accuracy", "roc_auc", "precision", "recall")) %>%
+    mutate(part="testing"))
+
+```
